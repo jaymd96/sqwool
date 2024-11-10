@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqwool"
+version = "0.1.0"
+authors = [
+    {name = "James AMD", email = "***@gmail.com"},
+]
+description = "My package description"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "BSD-3-Clause"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[tool.setuptools.package-data]
+mypkg = ["extensions/**/*.so", "extensions/**/*.dylib", "extensions/**/*.dll"]
+
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+skip-string-normalization = true
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F"]  # Select error codes (similar to flake8)
+ignore= ["F401", "E501"]

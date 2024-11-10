@@ -1,0 +1,213 @@
+import hashlib
+import json
+import shutil
+from dataclasses import dataclass
+from enum import Enum
+from typing import Dict, List, Optional, Set
+
+
+class BundledExtension(Enum):
+    """Common SQLite extensions available across platforms"""
+
+    FTS5 = "fts5"  # Full-text search
+    JSON1 = "json1"  # JSON functions
+    MATH = "math"  # Mathematical functions
+    REGEXP = "regexp"  # Regular expressions
+    PCRE = "pcre"  # Perl Compatible Regular Expressions
+    STATS = "stats"  # Statistical functions
+    COMPRESS = "compress"  # Compression functions
+    CRYPTO = "crypto"  # Encryption support
+    SPATIAL = "spatialite"  # Spatial/GIS support
+    UUID = "uuid"  # UUID generation
+    SERIES = "series"  # Generate series of values
+    INET = "inet"  # Internet address functions
+    FORMAT = "format"  # String formatting
+    VECTOR = "vector"  # Vector similarity search
+
+
+@dataclass
+class ExtensionInfo:
+    """Information about a specific extension build"""
+
+    name: str
+    version: str
+    platform: str
+    arch: str
+    dependencies: Set[str]
+    sha256: str
+    build_date: str
+    compiler: str
+    sqlite_min_version: str
+    entry_points: List[str]
+
+
+class ExtensionBundle:
+    """Manages bundled extensions shipping with sqwool"""
+
+    def __init__(self, base_dir: Path):
+        self.base_dir = base_dir
+        self.manifest_path = base_dir / "manifest.json"
+        self.platform_info = PlatformInfo.get_platform_info()
+        self._load_manifest()
+
+    def _load_manifest(self):
+        """Load or create the extension manifest"""
+        if self.manifest_path.exists():
+            with open(self.manifest_path) as f:
+                self.manifest = json.load(f)
+        else:
+            self.manifest = self._create_default_manifest()
+            self._save_manifest()
+
+    def _create_default_manifest(self) -> Dict:
+        """Create default manifest for bundled extensions"""
+        return {
+            "format_version": "1.0",
+            "extensions": {
+                ext.value: {
+                    "name": ext.value,
+                    "platforms": {
+                        "win-x64": {"version": "1.0.0", "sha256": None},
+                        "linux-x86": {"version": "1.0.0", "sha256": None},
+                        "linux-arm64": {"version": "1.0.0", "sha256": None},
+                        "macos-x86": {"version": "1.0.0", "sha256": None},
+                        "macos-arm64": {"version": "1.0.0", "sha256": None},
+                    },
+                    "dependencies": [],
+                    "sqlite_min_version": "3.35.0",
+                    "entry_points": [f"sqlite3_{ext.value}"],
+                }
+                for ext in BundledExtension
+            },
+        }
+
+    def _save_manifest(self):
+        """Save the extension manifest"""
+        with open(self.manifest_path, "w") as f:
+            json.dump(self.manifest, f, indent=2)
+
+    def get_bundled_extensions(self) -> List[ExtensionInfo]:
+        """Get information about available bundled extensions for current platform"""
+        platform_dir = self.platform_info["extensions_dir"]
+        available = []
+
+        for ext_name, ext_data in self.manifest["extensions"].items():
+            platform_data = ext_data["platforms"].get(platform_dir)
+            if platform_data and platform_data["sha256"]:
+                available.append(
+                    ExtensionInfo(
+                        name=ext_name,
+                        version=platform_data["version"],
+                        platform=self.platform_info["system"],
+                        arch=self.platform_info["arch"],
+                        dependencies=set(ext_data["dependencies"]),
+                        sha256=platform_data["sha256"],
+                        build_date=platform_data.get("build_date", "unknown"),
+                        compiler=platform_data.get("compiler", "unknown"),
+                        sqlite_min_version=ext_data["sqlite_min_version"],
+                        entry_points=ext_data["entry_points"],
+                    )
+                )
+
+        return available
+
+    def verify_extension(self, name: str, path: Path) -> bool:
+        """Verify extension file integrity"""
+        if not path.exists():
+            return False
+
+        platform_dir = self.platform_info["extensions_dir"]
+        ext_data = self.manifest["extensions"].get(name)
+        if not ext_data:
+            return False
+
+        platform_data = ext_data["platforms"].get(platform_dir)
+        if not platform_data or not platform_data["sha256"]:
+            return False
+
+        with open(path, "rb") as f:
+            file_hash = hashlib.sha256(f.read()).hexdigest()
+            return file_hash == platform_data["sha256"]
+
+    def install_bundled_extensions(self):
+        """Install bundled extensions to platform directory"""
+        platform_dir = self.platform_info["extensions_dir"]
+        bundle_dir = self.base_dir / "bundles" / platform_dir
+        target_dir = self.base_dir / platform_dir
+
+        if not bundle_dir.exists():
+            logging.warning(f"No bundled extensions found for {platform_dir}")
+            return
+
+        os.makedirs(target_dir, exist_ok=True)
+
+        for ext_info in self.get_bundled_extensions():
+            src = (
+                bundle_dir
+                / f"{ext_info.name}{self.extensions_manager.extension_patterns[self.platform_info['system']]}"
+            )
+            dst = target_dir / src.name
+
+            if src.exists() and self.verify_extension(ext_info.name, src):
+                shutil.copy2(src, dst)
+                logging.info(f"Installed bundled extension: {ext_info.name}")
+            else:
+                logging.warning(
+                    f"Bundled extension not found or invalid: {ext_info.name}"
+                )
+
+
+# Update Connection class to use bundled extensions
+class Connection(sqlite3.Connection):
+    """Enhanced Connection class with bundled extension support"""
+
+    def __init__(self, *args, **kwargs):
+        extensions_dir = kwargs.pop("extensions_dir", None)
+        self._extensions_enabled = False
+        super().__init__(*args, **kwargs)
+
+        # Initialize managers
+        self.extensions_manager = ExtensionsManager(
+            Path(extensions_dir) if extensions_dir else None
+        )
+        self.extension_bundle = ExtensionBundle(self.extensions_manager.base_dir)
+
+        # Try to enable extensions
+        self._try_enable_extensions()
+
+        # Install and load extensions
+        if self._extensions_enabled:
+            self.extension_bundle.install_bundled_extensions()
+            self._load_platform_extensions()
+
+
+# Add bundle management functions
+def list_bundled_extensions() -> List[ExtensionInfo]:
+    """List all bundled extensions available for current platform"""
+    bundle = ExtensionBundle(Path(DEFAULT_EXTENSIONS_DIR))
+    return bundle.get_bundled_extensions()
+
+
+def get_extension_info(name: str) -> Optional[ExtensionInfo]:
+    """Get information about a specific bundled extension"""
+    bundle = ExtensionBundle(Path(DEFAULT_EXTENSIONS_DIR))
+    for ext in bundle.get_bundled_extensions():
+        if ext.name == name:
+            return ext
+    return None
+
+
+def verify_bundled_extensions() -> Dict[str, bool]:
+    """Verify integrity of all bundled extensions"""
+    bundle = ExtensionBundle(Path(DEFAULT_EXTENSIONS_DIR))
+    platform_dir = PlatformInfo.get_platform_info()["extensions_dir"]
+    results = {}
+
+    for ext in bundle.get_bundled_extensions():
+        ext_path = (
+            bundle.base_dir
+            / "bundles"
+            / platform_dir
+            / f"{ext.name}{bundle.extensions_manager.extension_patterns[bundle.platform_info['system']]}"
+        )
+        results[ext.name] = bundle.verify_extension(ext.name, ext_path)
