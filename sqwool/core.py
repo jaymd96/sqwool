@@ -5,16 +5,18 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from sqlite3 import DatabaseError as DatabaseError
-from sqlite3 import DataError as DataError
-from sqlite3 import Error as Error
-from sqlite3 import IntegrityError as IntegrityError
-from sqlite3 import InterfaceError as InterfaceError
-from sqlite3 import InternalError as InternalError
-from sqlite3 import NotSupportedError as NotSupportedError
-from sqlite3 import OperationalError as OperationalError
-from sqlite3 import ProgrammingError as ProgrammingError
-from sqlite3 import Warning as Warning
+from sqlite3 import (
+    DatabaseError,
+    DataError,
+    Error,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    OperationalError,
+    ProgrammingError,
+    Warning,
+)
 from typing import Any, Dict, List, Optional
 
 # Re-export all sqlite3 constants and types
@@ -59,7 +61,6 @@ SQLITE_COPY = getattr(sqlite3, "SQLITE_COPY", None)
 SQLITE_RECURSIVE = getattr(sqlite3, "SQLITE_RECURSIVE", None)
 
 SEARCH_RECURSIVE = True
-ALLOWLIST = ["uuid"]
 
 
 class Cursor(sqlite3.Cursor):
@@ -112,7 +113,9 @@ class PlatformInfo:
 class ExtensionsManager:
     """Manage SQLite extensions for different platforms"""
 
-    def __init__(self, base_dir: Optional[Path] = None):
+    def __init__(
+        self, base_dir: Optional[Path] = None, allowlist: Optional[List[str]] = None
+    ):
         self.platform_info = PlatformInfo.get_platform_info()
         self.base_dir = base_dir or Path(
             os.environ.get("SQWOOL_EXTENSIONS_DIR", DEFAULT_EXTENSIONS_DIR)
@@ -121,6 +124,9 @@ class ExtensionsManager:
 
         # Extension patterns by platform
         self.extension_patterns = {"windows": ".dll", "linux": ".so", "macos": ".dylib"}
+
+        # Set the allowlist, defaulting to ["__ALL__"] if not provided
+        self.allowlist = allowlist or ["__ALL__"]
 
     def setup_directories(self):
         """Ensure all necessary directories exist"""
@@ -137,22 +143,25 @@ class ExtensionsManager:
         ]:
             os.makedirs(self.base_dir / platform_dir, exist_ok=True)
 
-    @staticmethod
-    def _should_load(ext: str):
-        if "__ALL__" in ALLOWLIST:
+    def _should_load(self, ext: Path) -> bool:
+        if "__ALL__" in self.allowlist:
             return True  # signal to load everything
-        return ext.stem.upper() in ",".join(ALLOWLIST).upper()
+        return ext.stem.upper() in [item.upper() for item in self.allowlist]
 
     def get_platform_extensions(self) -> List[Path]:
         """Get list of extensions for current platform"""
         if not self.platform_dir.exists():
             return []
 
-        pattern = self.extension_patterns.get(self.platform_info["system"], ".so")
-        if SEARCH_RECURSIVE:
-            pattern = f"/*{pattern}"
+        pattern = f"*{self.extension_patterns.get(self.platform_info['system'], '.so')}"
 
-        all_ext = list(self.platform_dir.glob(f"*{pattern}"))
+        if SEARCH_RECURSIVE:
+            # Use rglob for recursive search
+            all_ext = list(self.platform_dir.rglob(pattern))
+        else:
+            # Use glob for non-recursive search
+            all_ext = list(self.platform_dir.glob(pattern))
+
         to_load_ext = [ext for ext in all_ext if self._should_load(ext)]
         return to_load_ext
 
@@ -223,12 +232,20 @@ class Connection(sqlite3.Connection):
 
     def __init__(self, *args, **kwargs):
         self._extensions_enabled = False
+        self.extensions_manager: Optional[ExtensionsManager] = None
         super().__init__(*args, **kwargs)
 
-    def init_extensions(self, extensions_dir: Optional[str] = None):
+    def init_extensions(
+        self,
+        extensions_dir: Optional[str] = None,
+        allowlist: Optional[List[str]] = None,
+    ):
         """Initialize extensions after creating the connection."""
         self._extensions_dir = Path(extensions_dir) if extensions_dir else None
-        self.extensions_manager = ExtensionsManager(self._extensions_dir)
+        self.extensions_manager = ExtensionsManager(
+            self._extensions_dir, allowlist=allowlist
+        )
+        self.extensions_manager.setup_directories()
         self._try_enable_extensions()
         if self._extensions_enabled:
             self._load_platform_extensions()
@@ -248,7 +265,7 @@ class Connection(sqlite3.Connection):
 
     def _load_platform_extensions(self):
         """Load extensions specific to current platform"""
-        if not self._extensions_enabled:
+        if not self._extensions_enabled or not self.extensions_manager:
             return
 
         for ext_path in self.extensions_manager.get_platform_extensions():
@@ -269,6 +286,8 @@ class Connection(sqlite3.Connection):
     @property
     def platform_extensions_dir(self) -> Path:
         """Get platform-specific extensions directory"""
+        if not self.extensions_manager:
+            raise RuntimeError("ExtensionsManager is not initialized.")
         return self.extensions_manager.platform_extensions_dir
 
 
@@ -282,6 +301,7 @@ def connect(
     cached_statements: int = 128,
     uri: bool = False,
     extensions_dir: Optional[str] = None,
+    allowlist: Optional[List[str]] = None,  # Added allowlist parameter
     **kwargs,
 ) -> Connection:
     """Drop-in replacement for sqlite3.connect() that automatically loads extensions"""
@@ -300,7 +320,7 @@ def connect(
         uri=uri,
         **kwargs,
     )
-    conn.init_extensions(extensions_dir=extensions_dir)
+    conn.init_extensions(extensions_dir=extensions_dir, allowlist=allowlist)
     return conn
 
 
