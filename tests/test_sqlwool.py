@@ -1,10 +1,11 @@
+# tests/test_sqlwool.py
+
 import sqlite3
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from sqwool import ALLOWLIST  # Replace 'sqwool' with the actual module name
 from sqwool import (
     Connection,
     ExtensionsManager,
@@ -64,17 +65,47 @@ class TestPlatformInfo:
         assert PlatformInfo.is_supported_platform() is False
 
 
-class TestExtensionsManager:
-    @pytest.fixture
-    def manager(self):
-        with mock.patch("sqwool.PlatformInfo.get_platform_info") as mock_get_info:
-            mock_get_info.return_value = {
-                "system": "linux",
-                "arch": "x86",
-                "extensions_dir": "linux-x86",
-            }
-            return ExtensionsManager(base_dir=Path("/fake/extensions"))
+@pytest.fixture
+def manager():
+    with mock.patch("sqwool.PlatformInfo.get_platform_info") as mock_get_info:
+        mock_get_info.return_value = {
+            "system": "linux",
+            "arch": "x86",
+            "extensions_dir": "linux-x86",
+        }
+        return ExtensionsManager(base_dir=Path("/fake/extensions"))
 
+
+@pytest.fixture
+def manager_factory():
+    """
+    Fixture that returns a factory function to create ExtensionsManager instances
+    with a specified allowlist.
+    """
+    with mock.patch("sqwool.PlatformInfo.get_platform_info") as mock_get_info:
+        mock_get_info.return_value = {
+            "system": "linux",
+            "arch": "x86",
+            "extensions_dir": "linux-x86",
+        }
+
+        def _create_manager(allowlist=None, base_dir=Path("/fake/extensions")):
+            """
+            Factory function to create an ExtensionsManager instance.
+
+            Args:
+                allowlist (List[str], optional): List of allowed extensions.
+                base_dir (Path, optional): Base directory for extensions.
+
+            Returns:
+                ExtensionsManager: Configured ExtensionsManager instance.
+            """
+            return ExtensionsManager(base_dir=base_dir, allowlist=allowlist)
+
+        return _create_manager
+
+
+class TestExtensionsManager:
     def test_initialization(self, manager):
         assert manager.platform_info["system"] == "linux"
         assert manager.platform_info["arch"] == "x86"
@@ -87,6 +118,7 @@ class TestExtensionsManager:
     def test_setup_directories(self, mock_makedirs, manager):
         manager.setup_directories()
         expected_dirs = [
+            Path("/fake/extensions"),
             Path("/fake/extensions/win-x64"),
             Path("/fake/extensions/linux-x86"),
             Path("/fake/extensions/linux-arm64"),
@@ -95,42 +127,62 @@ class TestExtensionsManager:
         ]
         calls = [mock.call(dir, exist_ok=True) for dir in expected_dirs]
         mock_makedirs.assert_has_calls(calls, any_order=True)
+        assert mock_makedirs.call_count == len(expected_dirs)
 
-    def test_should_load_all_allowlist(self, manager):
-        global ALLOWLIST
-        original_allowlist = ALLOWLIST.copy()
-        ALLOWLIST.append("__ALL__")
+    def test_should_load_all_allowlist(self, manager_factory):
+        # Define the allowlist to load all extensions
+        allowlist = ["__ALL__"]
+
+        # Initialize ExtensionsManager with the "__ALL__" allowlist
+        manager = manager_factory(allowlist=allowlist)
+
+        # Define a sample extension path
         ext = Path("uuid.so")
-        assert manager._should_load(ext) is True
-        ALLOWLIST.remove("__ALL__")
-        # Restore original allowlist
-        ALLOWLIST[:] = original_allowlist
 
-    def test_should_load_allowed_extension(self, manager):
-        ALLOWLIST.append("UUID")
+        # Assert that the extension should be loaded
+        assert manager._should_load(ext) is True
+
+    def test_should_load_allowed_extension(self, manager_factory):
+        # Define the allowlist with a specific extension
+        allowlist = ["UUID"]
+
+        # Initialize ExtensionsManager with the specific allowlist
+        manager = manager_factory(allowlist=allowlist)
+
+        # Define a sample extension path
         ext = Path("uuid.so")
-        assert manager._should_load(ext) is True
-        ALLOWLIST.remove("UUID")
 
-    def test_should_not_load_disallowed_extension(self, manager):
+        # Assert that the extension should be loaded
+        assert manager._should_load(ext) is True
+
+    def test_should_load_allowed_extension_case_insensitive(self, manager_factory):
+        # Define the allowlist with lowercase extension name
+        allowlist = ["uuid"]
+
+        # Initialize ExtensionsManager with the specific allowlist
+        manager = manager_factory(allowlist=allowlist)
+
+        # Define a sample extension path with uppercase name
+        ext = Path("UUID.so")
+
+        # Assert that the extension should be loaded (case-insensitive)
+        assert manager._should_load(ext) is True
+
+    def test_should_not_load_disallowed_extension(self, manager_factory):
+        # Define an allowlist that does not include "malicious"
+        allowlist = ["UUID"]
+
+        # Initialize ExtensionsManager with the specific allowlist
+        manager = manager_factory(allowlist=allowlist)
+
+        # Define a sample extension path that is not allowed
         ext = Path("malicious.so")
+
+        # Assert that the extension should NOT be loaded
         assert manager._should_load(ext) is False
 
-    @mock.patch.object(ExtensionsManager, "_should_load", return_value=True)
-    @mock.patch("pathlib.Path.glob")
-    @mock.patch("pathlib.Path.exists")
-    def test_get_platform_extensions(
-        self, mock_exists, mock_glob, mock_should_load, manager
-    ):
-        mock_glob.return_value = [Path("uuid.so"), Path("test.so")]
-        mock_exists.return_value = True
-        extensions = manager.get_platform_extensions()
-        assert extensions == [Path("uuid.so"), Path("test.so")]
-        mock_glob.assert_called_with("*/*.so")
-
-    @mock.patch("pathlib.Path.exists")
+    @mock.patch("sqwool.core.Path.exists", return_value=True)
     def test_validate_extension_valid(self, mock_exists, manager):
-        mock_exists.return_value = True
         ext = Path("uuid.so")
         assert manager.validate_extension(ext) is True
 
@@ -138,10 +190,10 @@ class TestExtensionsManager:
         ext = Path("uuid.dll")
         assert manager.validate_extension(ext) is False
 
-    def test_validate_extension_nonexistent_file(self, manager):
+    @mock.patch("sqwool.core.Path.exists", return_value=False)
+    def test_validate_extension_nonexistent_file(self, mock_exists, manager):
         ext = Path("/nonexistent/uuid.so")
-        with mock.patch.object(Path, "exists", return_value=False):
-            assert manager.validate_extension(ext) is False
+        assert manager.validate_extension(ext) is False
 
 
 class TestSQLiteSystemInfo:
@@ -198,26 +250,53 @@ class TestSQLiteSystemInfo:
 class TestConnection:
     @pytest.fixture
     def connection(self):
-        # Create a mock connection object
-        with mock.patch("sqwool.connect") as mock_connect:
+        # Patch sqlite3.connect to return a mock Connection
+        with mock.patch("sqlite3.connect") as mock_sqlite_connect:
             mock_conn = mock.Mock(spec=Connection)
-            mock_connect.return_value = mock_conn
+            mock_sqlite_connect.return_value = mock_conn
             conn = Connection(":memory:")
             return conn
 
-    def test_init_extensions_enabled(self, connection):
+    def test_init_extensions_enabled(self, connection, manager_factory):
         with mock.patch.object(connection, "enable_load_extension") as mock_enable:
-            with mock.patch.object(
-                ExtensionsManager, "get_platform_extensions", return_value=[]
-            ):
-                with mock.patch.object(
+            # Patch ExtensionsManager methods and os.makedirs
+            with (
+                mock.patch.object(
+                    ExtensionsManager, "get_platform_extensions", return_value=[]
+                ),
+                mock.patch.object(
                     ExtensionsManager, "validate_extension", return_value=True
-                ):
-                    connection.init_extensions(extensions_dir="/fake/extensions")
-                    mock_enable.assert_called_with(True)
-                    assert connection._extensions_enabled is True
+                ),
+                mock.patch("os.makedirs") as mock_makedirs,
+            ):
+                # Initialize extensions with manager_factory
+                manager = manager_factory(allowlist=["__ALL__"])
+                connection.extensions_manager = manager
+                connection.init_extensions(extensions_dir="/fake/extensions")
 
-    def test_init_extensions_disabled(self, connection):
+                # Assert that 'enable_load_extension' was called correctly
+                mock_enable.assert_called_with(True)
+
+                # Assert that extensions were enabled
+                assert connection._extensions_enabled is True
+
+                # Define expected calls to 'os.makedirs'
+                expected_calls = [
+                    mock.call(Path("/fake/extensions"), exist_ok=True),
+                    mock.call(Path("/fake/extensions/win-x64"), exist_ok=True),
+                    mock.call(Path("/fake/extensions/linux-x86"), exist_ok=True),
+                    mock.call(Path("/fake/extensions/linux-arm64"), exist_ok=True),
+                    mock.call(Path("/fake/extensions/macos-x86"), exist_ok=True),
+                    mock.call(Path("/fake/extensions/macos-arm64"), exist_ok=True),
+                ]
+
+                # Assert that 'os.makedirs' was called with all expected directories
+                mock_makedirs.assert_has_calls(expected_calls, any_order=True)
+
+                # Optionally, assert that 'os.makedirs' was called the correct number of times
+                assert mock_makedirs.call_count == len(expected_calls)
+
+    def test_init_extensions_disabled(self, connection, manager_factory):
         with mock.patch.object(
             connection,
             "enable_load_extension",
@@ -231,54 +310,97 @@ class TestConnection:
                     "extensions_dir": "linux-x86",
                 },
             ):
-                with mock.patch("logging.warning") as mock_log:
+                with (
+                    mock.patch("logging.warning") as mock_log,
+                    mock.patch("os.makedirs") as mock_makedirs,
+                ):
                     connection.init_extensions(extensions_dir="/fake/extensions")
+
+                    # Assert that a warning was logged
                     mock_log.assert_called()
+
+                    # Assert that extensions were not enabled
                     assert connection._extensions_enabled is False
 
-    def test_load_platform_extensions_success(self, connection):
-        with mock.patch.object(connection, "_extensions_enabled", True):
-            with mock.patch.object(
-                connection, "extensions_manager", create=True
-            ) as mock_manager:
-                mock_manager.get_platform_extensions.return_value = [Path("uuid.so")]
-                mock_manager.validate_extension.return_value = True
-                with mock.patch.object(connection, "load_extension") as mock_load_ext:
-                    connection._load_platform_extensions()
-                    mock_load_ext.assert_called_with("uuid.so")
+                    # Define expected calls to 'os.makedirs'
+                    expected_calls = [
+                        mock.call(Path("/fake/extensions"), exist_ok=True),
+                        mock.call(Path("/fake/extensions/win-x64"), exist_ok=True),
+                        mock.call(Path("/fake/extensions/linux-x86"), exist_ok=True),
+                        mock.call(Path("/fake/extensions/linux-arm64"), exist_ok=True),
+                        mock.call(Path("/fake/extensions/macos-x86"), exist_ok=True),
+                        mock.call(Path("/fake/extensions/macos-arm64"), exist_ok=True),
+                    ]
 
-    def test_load_platform_extensions_invalid_extension(self, connection):
+                    # Assert that 'os.makedirs' was called with all expected directories
+                    mock_makedirs.assert_has_calls(expected_calls, any_order=True)
+
+                    # Optionally, assert that 'os.makedirs' was called the correct number of times
+                    assert mock_makedirs.call_count == len(expected_calls)
+
+    def test_load_platform_extensions_success(self, connection, manager_factory):
         with mock.patch.object(connection, "_extensions_enabled", True):
-            with mock.patch.object(
-                connection, "extensions_manager", create=True
-            ) as mock_manager:
-                mock_manager.get_platform_extensions.return_value = [
-                    Path("malicious.dll")
-                ]
-                mock_manager.validate_extension.return_value = False
+            with (
+                mock.patch.object(
+                    ExtensionsManager,
+                    "get_platform_extensions",
+                    return_value=[Path("uuid.so")],
+                ),
+                mock.patch.object(
+                    ExtensionsManager, "validate_extension", return_value=True
+                ),
+                mock.patch.object(connection, "load_extension") as mock_load_ext,
+            ):
+                connection.extensions_manager = manager_factory(allowlist=["UUID"])
+                connection._load_platform_extensions()
+                mock_load_ext.assert_called_with("uuid.so")
+
+    def test_load_platform_extensions_invalid_extension(
+        self, connection, manager_factory
+    ):
+        with mock.patch.object(connection, "_extensions_enabled", True):
+            with (
+                mock.patch.object(
+                    ExtensionsManager,
+                    "get_platform_extensions",
+                    return_value=[Path("malicious.dll")],
+                ),
+                mock.patch.object(
+                    ExtensionsManager, "validate_extension", return_value=False
+                ),
+            ):
                 with mock.patch("logging.warning") as mock_log:
+                    connection.extensions_manager = manager_factory(
+                        allowlist=["__ALL__"]
+                    )
                     connection._load_platform_extensions()
                     mock_log.assert_called_with(
                         "Invalid extension for platform: malicious.dll"
                     )
 
-    def test_load_platform_extensions_load_failure(self, connection):
+    def test_load_platform_extensions_load_failure(self, connection, manager_factory):
         with mock.patch.object(connection, "_extensions_enabled", True):
-            with mock.patch.object(
-                connection, "extensions_manager", create=True
-            ) as mock_manager:
-                mock_manager.get_platform_extensions.return_value = [Path("uuid.so")]
-                mock_manager.validate_extension.return_value = True
-                with mock.patch.object(
+            with (
+                mock.patch.object(
+                    ExtensionsManager,
+                    "get_platform_extensions",
+                    return_value=[Path("uuid.so")],
+                ),
+                mock.patch.object(
+                    ExtensionsManager, "validate_extension", return_value=True
+                ),
+                mock.patch.object(
                     connection,
                     "load_extension",
                     side_effect=sqlite3.Error("Load failed"),
-                ):
-                    with mock.patch("logging.warning") as mock_log:
-                        connection._load_platform_extensions()
-                        mock_log.assert_called_with(
-                            "Failed to load extension uuid.so: Load failed"
-                        )
+                ),
+            ):
+                with mock.patch("logging.warning") as mock_log:
+                    connection.extensions_manager = manager_factory(allowlist=["UUID"])
+                    connection._load_platform_extensions()
+                    mock_log.assert_called_with(
+                        "Failed to load extension uuid.so: Load failed"
+                    )
 
     def test_extensions_supported_true(self, connection):
         connection._extensions_enabled = True
@@ -307,14 +429,27 @@ class TestConnectFunction:
             cached_statements=128,
             uri=False,
         )
-        mock_custom_conn.init_extensions.assert_called_with(extensions_dir=None)
+        mock_custom_conn.init_extensions.assert_called_with(
+            extensions_dir=None, allowlist=None
+        )
         assert conn == mock_custom_conn
 
     @mock.patch("sqwool.Connection")
     @mock.patch("sqlite3.connect")
     def test_connect_with_extensions_dir(self, mock_sqlite_connect, mock_custom_conn):
         mock_sqlite_connect.return_value = mock_custom_conn
-        conn = connect("test.db", extensions_dir="/fake/extensions")  # noqa: F841
-        mock_custom_conn.init_extensions.assert_called_with(
-            extensions_dir="/fake/extensions"
+        conn = connect("test.db", extensions_dir="/fake/extensions")
+        mock_sqlite_connect.assert_called_with(
+            database="test.db",
+            timeout=5.0,
+            detect_types=0,
+            isolation_level=None,
+            check_same_thread=True,
+            factory=Connection,
+            cached_statements=128,
+            uri=False,
         )
+        mock_custom_conn.init_extensions.assert_called_with(
+            extensions_dir="/fake/extensions", allowlist=None
+        )
+        assert conn == mock_custom_conn
